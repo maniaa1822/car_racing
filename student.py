@@ -186,6 +186,7 @@ class Policy(nn.Module):
 
     def train(self):
         # TODO
+        # 1. sample batch from memory
         if len(self.memory) < self.batch_size:
             return
         state , action , reward , next_state , done , indices , weights = self.memory.sample(self.batch_size)
@@ -195,25 +196,30 @@ class Policy(nn.Module):
         reward = torch.FloatTensor(reward).to(self.device)
         done = torch.FloatTensor(done).to(self.device)
         weights = torch.FloatTensor(weights).to(self.device)
+        # 2. get the q values for current state and next state from current network and target network respectively
+        q_values = self.current_net(state) # compute q values for current state
+        next_q_values = self.current_net(next_state) # compute q values for next state
+        next_q_state_values = self.target_net(next_state) # compute q values for next state from target network
+        # 3. compute the expected q values
+        q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1) # gather the q values of the actions taken
+        next_q_value = next_q_state_values.gather(1, torch.max(next_q_values, 1)[1].unsqueeze(1)).squeeze(1) # gather the q values of the actions taken
+        expected_q_value = reward + self.gamma * next_q_value * (1 - done) # compute the expected q value
         
-        q_values = self.current_net(state)
-        next_q_values = self.current_net(next_state)
-        next_q_state_values = self.target_net(next_state)
+        loss = (q_value - expected_q_value.detach()).pow(2) * weights # huber loss
+        prios = loss + 1e-5 # small epsilon to avoid zero priority
+        loss = loss.mean() # mean loss over batch
         
-        q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
-        next_q_value = next_q_state_values.gather(1, torch.max(next_q_values, 1)[1].unsqueeze(1)).squeeze(1)
-        expected_q_value = reward + self.gamma * next_q_value * (1 - done)
-        
-        loss = (q_value - expected_q_value.detach()).pow(2) * weights
-        prios = loss + 1e-5
-        loss = loss.mean()
-        
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.memory.update_priorities(indices, prios.data.cpu().numpy())
-        self.optimizer.step()
+        self.optimizer.zero_grad() # zero gradients from previous step
+        loss.backward() # compute gradients
+        self.memory.update_priorities(indices, prios.data.cpu().numpy()) # update priorities
+        self.optimizer.step() # apply gradients
+        if self.steps_done % 1000 == 0:
+            self.update_target() # update target network every 1000 steps
         
         return
+    
+    def update_target(self):
+        self.target_net.load_state_dict(self.current_net.state_dict())
 
     def save(self):
         torch.save(self.state_dict(), 'model.pt')
